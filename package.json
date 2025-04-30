@@ -1,0 +1,9 @@
+{
+  "name": "quantum-markets",
+  "workspaces": [],
+  "private": true,
+  "scripts": {},
+  "devDependencies": {},
+  "engines": {},
+  "dependencies": {}
+}

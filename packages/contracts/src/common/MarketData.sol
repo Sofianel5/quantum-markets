@@ -2,7 +2,7 @@
 pragma solidity >=0.8.26;
 
 import {IMarketResolver} from "../interfaces/IMarketResolver.sol";
-import {DecisionToken, WUSDC} from "../Tokens.sol";
+import {DecisionToken, VUSD} from "../Tokens.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 
 enum MarketStatus {

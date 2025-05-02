@@ -5,12 +5,14 @@ import {Id} from "./Id.sol";
 import {IMarket} from "./interfaces/IMarket.sol";
 import {IMarketResolver} from "./interfaces/IMarketResolver.sol";
 import {MarketStatus, MarketConfig, ProposalConfig} from "./common/MarketData.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IUniswapV3Factory} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
-import {DecisionToken, TokenType, WUSDC} from "./Tokens.sol";
+import {DecisionToken, TokenType, VUSD} from "./Tokens.sol";
 
 contract Market is IMarket, Ownable {
     Id public id;
@@ -25,6 +27,7 @@ contract Market is IMarket, Ownable {
 
     error MarketClosed();
     error ProposalNotTradable();
+    error MarketNotSettled();
 
     struct MaxProposal {
         int256 yesPrice;
@@ -59,7 +62,7 @@ contract Market is IMarket, Ownable {
             revert MarketClosed();
         }
         ERC20(config.marketToken).transferFrom(depositor, address(this), amount);
-        depsoits[marketId] += amount;
+        deposits[marketId] += amount;
     }
 
     function claimVirtualTokenForProposal(address depositor, uint256 proposalId) external {
@@ -83,7 +86,7 @@ contract Market is IMarket, Ownable {
     }
 
     function redeemYesNo(uint256 proposalId, uint256 amount) external {
-        ProposalConfig memory config = markets[marketId];
+        ProposalConfig memory config = proposals[proposalId];
         config.yesToken.burnFrom(msg.sender, amount);
         config.noToken.burnFrom(msg.sender, amount);
         config.vUSD.transferFrom(address(this), msg.sender, amount);
@@ -96,7 +99,7 @@ contract Market is IMarket, Ownable {
         uint256 minDeposit,
         string memory title
     ) external returns (uint256 marketId) {
-        uint256 marketId = id.getId();
+        marketId = id.getId();
 
         markets[marketId] = MarketConfig({
             id: marketId,
@@ -121,6 +124,7 @@ contract Market is IMarket, Ownable {
 
         VUSD vUSD = new VUSD(address(this));
 
+        address depositor = msg.sender;
         uint256 totalDeposited = deposits[marketId][depositor];
         uint256 alreadyClaimed = proposalDepositClaims[proposalId][depositor];
         uint256 claimable = totalDeposited - alreadyClaimed;
@@ -233,31 +237,35 @@ contract Market is IMarket, Ownable {
     function resolveMarket(uint256 marketId, bool yesOrNo, bytes memory proof) external {
         MarketConfig storage market = markets[marketId];
         require(market.status == MarketStatus.PROPOSAL_ACCEPTED);
-        IMarketResolver(market.resolver).verifyResolution(yesOrNo, proof);
+        IMarketResolver(market.resolver).verifyResolution(yesOrNo, proof); // Should revert if verification fails.
         if (yesOrNo) {
             market.status = MarketStatus.RESOLVED_YES;
         } else {
             market.status = MarketStatus.RESOLVED_NO;
         }
-        account.rewardsUsed += account.successReward;
         market.yesPool.collect(owner(), TickMath.MIN_TICK, TickMath.TICK_MAX, type(uint128).max, type(uint128).max);
         market.noPool.collect(owner(), TickMath.MIN_TICK, TickMath.TICK_MAX, type(uint128).max, type(uint128).max);
 
-        emit MarketSettled(marketId, passed);
+        emit MarketSettled(marketId, yesOrNo);
     }
 
-    function redeemRewards(uint256 proposalId, address user) external {
-        ProposalConfig memory proposal = proposals[proposalId];
-        MarketConfig memory market = markets[proposal.marketId];
+    function redeemRewards(uint256 marketId, address user) external {
+        MarketConfig memory market = markets[marketId];
         uint256 tradingRewards;
         if (market.status == MarketStatus.RESOLVED_YES) {
-            tradingRewards = market.yesToken.balanceOf(user);
+            uint256 winningProposalId = acceptedProposals[marketId];
+            ProposalConfig memory proposal = proposals[winningProposalId];
+            tradingRewards = proposal.yesToken.balanceOf(user);
         } else if (market.status == MarketStatus.RESOLVED_NO) {
+            uint256 winningProposalId = acceptedProposals[marketId];
+            ProposalConfig memory proposal = proposals[winningProposalId];
             tradingRewards = market.noToken.balanceOf(user);
+        } else {
+            revert MarketNotSettled();
         }
 
         claims[marketId][user] = true;
-        ERC20(account.marketToken).transfer(user, tradingRewards);
+        ERC20(market.marketToken).transfer(user, tradingRewards);
     }
 
     function acceptMarket(uint256 marketId) internal {}

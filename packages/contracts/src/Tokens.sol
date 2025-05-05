@@ -41,6 +41,6 @@ contract DecisionToken is ERC20, ERC20Burnable, ERC20Mintable {
     }
 }
 
-contract VUSD is ERC20, ERC20Mintable {
+contract VUSD is ERC20, ERC20Burnable, ERC20Mintable {
     constructor(address minter) ERC20("Virtual USDC", "VUSD") ERC20Mintable(minter) {}
 }

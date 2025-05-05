@@ -5,12 +5,24 @@ import {BaseHook} from "@uniswap/v4-periphery/src/utils/BaseHook.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/PoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 
-contract OnlyMarketSwapHook is BaseHook {
+contract MarketUtilsSwapHook is BaseHook {
+    using StateLibrary for IPoolManager;
+
     address public immutable market;
+
+    struct Obs {
+        uint32 time;
+        int56 tickCumulative;
+        int24  lastTick;
+    }
+
+    mapping(PoolId poolId => Obs) public lastObs;
 
     constructor(IPoolManager pm, address _market) BaseHook(pm) {
         market = _market;
@@ -36,9 +48,9 @@ contract OnlyMarketSwapHook is BaseHook {
         });
     }
 
-    /* gate every swap */
     function _beforeSwap(address sender, PoolKey calldata, SwapParams calldata, bytes calldata)
         internal
+        view
         override
         returns (bytes4, BeforeSwapDelta, uint24)
     {
@@ -46,11 +58,39 @@ contract OnlyMarketSwapHook is BaseHook {
         return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
 
-    function _afterSwap(address, PoolKey calldata, SwapParams calldata, BalanceDelta, bytes calldata)
+    function _afterSwap(address, PoolKey calldata key, SwapParams calldata, BalanceDelta, bytes calldata)
         internal
         override
         returns (bytes4, int128)
     {
+        PoolId id = PoolIdLibrary.toId(key);
+        Obs storage o = lastObs[id];
+        (, int24 tick,,) = poolManager.getSlot0(id);
+
+        uint32 now32 = uint32(block.timestamp);
+        if (o.time != 0) {
+            o.tickCumulative += int56(int24(tick)) * int56(uint56(now32 - o.time));
+        }
+        o.time = now32;
+        o.lastTick = tick;
         return (BaseHook.afterSwap.selector, 0);
+    }
+
+    /* view function any contract can call */
+    function consult(PoolKey calldata key, uint32 secondsAgo) external view returns (int24 avgTick) {
+        require(secondsAgo != 0, "secondsAgo=0");
+        PoolId id = PoolIdLibrary.toId(key);
+
+        Obs storage o = lastObs[id];
+        require(o.time != 0, "no obs yet");
+
+        uint32 dtNow = uint32(block.timestamp) - o.time;
+        int56 tickCumulativeNow = o.tickCumulative + int56(o.lastTick) * int56(uint56(dtNow));
+
+        require(secondsAgo <= dtNow, "window > stored span");
+
+        int56 tickCumulativeAgo = tickCumulativeNow - int56(o.lastTick) * int56(uint56(secondsAgo));
+
+        avgTick = int24((tickCumulativeNow - tickCumulativeAgo) / int56(uint56(secondsAgo)));
     }
 }

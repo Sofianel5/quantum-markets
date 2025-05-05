@@ -16,3 +16,6 @@
 [submodule "packages/contracts/lib/universal-router"]
 	path = packages/contracts/lib/universal-router
 	url = https://github.com/uniswap/universal-router
+[submodule "packages/contracts/lib/v3-core"]
+	path = packages/contracts/lib/v3-core
+	url = https://github.com/uniswap/v3-core

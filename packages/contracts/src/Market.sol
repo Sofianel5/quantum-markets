@@ -330,5 +330,4 @@ contract Market is IMarket, Ownable {
         ERC20(market.marketToken).transfer(user, tradingRewards);
     }
 
-    function acceptMarket(uint256 marketId) internal {}
 }

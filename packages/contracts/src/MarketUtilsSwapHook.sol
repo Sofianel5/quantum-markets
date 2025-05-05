@@ -76,7 +76,6 @@ contract MarketUtilsSwapHook is BaseHook {
         return (BaseHook.afterSwap.selector, 0);
     }
 
-    /* view function any contract can call */
     function consult(PoolKey calldata key, uint32 secondsAgo) external view returns (int24 avgTick) {
         require(secondsAgo != 0, "secondsAgo=0");
         PoolId id = PoolIdLibrary.toId(key);

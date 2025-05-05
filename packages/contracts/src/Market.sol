@@ -10,14 +10,18 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/PoolManager.sol";
+import {ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {IV4Router} from "@uniswap/v4-periphery/contracts/interfaces/IV4Router.sol";
 import {DecisionToken, TokenType, VUSD} from "./Tokens.sol";
 
 contract Market is IMarket, Ownable {
     Id public id;
     IPoolManager public immutable poolManager;
+    IV4Router public immutable v4Router;
+    address public immutable permit2;
     OnlyMarketSwapHook public immutable hook;
 
     uint24 public POOL_FEE = 3000;
@@ -61,7 +65,7 @@ contract Market is IMarket, Ownable {
             revert MarketClosed();
         }
         ERC20(config.marketToken).transferFrom(depositor, address(this), amount);
-        deposits[marketId] += amount;
+        deposits[marketId][depositor] += amount;
     }
 
     function claimVirtualTokenForProposal(address depositor, uint256 proposalId) external {
@@ -96,6 +100,7 @@ contract Market is IMarket, Ownable {
         address marketToken,
         address resolver,
         uint256 minDeposit,
+        uint256 strikePrice,
         string memory title
     ) external returns (uint256 marketId) {
         marketId = id.getId();
@@ -104,6 +109,7 @@ contract Market is IMarket, Ownable {
             id: marketId,
             createdAt: block.timestamp,
             minDeposit: minDeposit,
+            strikePrice: strikePrice,
             creator: creator,
             marketToken: marketToken,
             resolver: resolver,
@@ -144,9 +150,9 @@ contract Market is IMarket, Ownable {
             tickSpacing: 60,
             hooks: hook
         });
-        poolManager.initializePool(
+        poolManager.initialize(
             yesPoolKey,
-            TickMath.getSqrtRatioAtTick(TickMath.MIN_TICK + 1) // ≈ 0 price
+            TickMath.getSqrtPriceAtTick(TickMath.MIN_TICK + 1) // ≈ 0 price
         );
         PoolKey memory noPoolKey = PoolKey({
             currency0: Currency.wrap(address(noToken)),
@@ -155,47 +161,50 @@ contract Market is IMarket, Ownable {
             tickSpacing: 60,
             hooks: hook
         });
-        poolManager.initializePool(
+        poolManager.initialize(
             noPoolKey,
-            TickMath.getSqrtRatioAtTick(0) // 1:1 price
+            TickMath.getSqrtPriceAtTick(0) // 1:1 price
         );
 
-        poolManager.modifyPosition(
+        poolManager.modifyLiquidity(
             yesPoolKey,
-            IPoolManager.ModifyPositionParams({
+            ModifyLiquidityParams({
                 tickLower: TickMath.MIN_TICK,
                 tickUpper: TickMath.MAX_TICK,
-                liquidityDelta: int256(marketConfig.minDeposit / 4)
+                liquidityDelta: int256(marketConfig.minDeposit / 4),
+                salt: 0
             }),
             ""
         );
 
-        poolManager.modifyPosition(
+        poolManager.modifyLiquidity(
             noPoolKey,
-            IPoolManager.ModifyPositionParams({
+            ModifyLiquidityParams({
                 tickLower: TickMath.MIN_TICK,
                 tickUpper: TickMath.MAX_TICK,
-                liquidityDelta: int256((marketConfig.minDeposit * 3) / 4)
+                liquidityDelta: int256((marketConfig.minDeposit * 3) / 4),
+                salt: 0
             }),
             ""
         );
 
         proposals[proposalId] = ProposalConfig({
             id: proposalId,
+            marketId: marketId,
             createdAt: block.timestamp,
             creator: msg.sender,
             vUSD: vUSD,
             yesToken: yesToken,
             noToken: noToken,
             yesPoolKey: yesPoolKey,
-            noPoolKey: noPoolKet,
+            noPoolKey: noPoolKey,
             data: data
         });
 
         emit ProposalCreated(marketId, proposalId, block.timestamp, msg.sender);
     }
 
-    function tradeProposal(uint256 proposalId, address trader, bool yesOrNo, bool zeroForOne, int256 amountIn)
+    function tradeProposal(uint256 proposalId, address trader, bool yesOrNo, bool zeroForOne, int256 amountIn, uint256  amountOutMin)
         external
     {
         ProposalConfig memory proposal = proposals[proposalId];
@@ -209,16 +218,7 @@ contract Market is IMarket, Ownable {
         ) {
             revert ProposalNotTradable();
         }
-
-        IERC20 inputToken = zeroForOne ? IERC20(proposal.yesPool.token0()) : IERC20(proposal.yesPool.token1());
-
-        inputToken.transferFrom(trader, address(this), uint256(amountIn));
-
-        inputToken.approve(address(yesOrNo ? proposal.yesPool : proposal.noPool), uint256(amountIn));
-
-        (int256 amount0, int256 amount1) = yesOrNo
-            ? proposal.yesPool.swap(trader, zeroForOne, amountIn, 0, "")
-            : proposal.noPool.swap(trader, zeroForOne, amountIn, 0, "");
+        
 
         if (yesOrNo && zeroForOne && amount0 != 0) {
             int256 yesPrice = (amount1 * 1e18) / amount0;

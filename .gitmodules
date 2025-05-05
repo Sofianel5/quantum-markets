@@ -13,3 +13,6 @@
 [submodule "packages/contracts/lib/permit2"]
 	path = packages/contracts/lib/permit2
 	url = https://github.com/uniswap/permit2
+[submodule "packages/contracts/lib/universal-router"]
+	path = packages/contracts/lib/universal-router
+	url = https://github.com/uniswap/universal-router

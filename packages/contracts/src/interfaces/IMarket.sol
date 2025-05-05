@@ -9,12 +9,13 @@ interface IMarket {
         address marketToken,
         address resolver,
         uint256 minDeposit,
+        uint256 strikePrice,
         string memory title
     ) external returns (uint256 marketId);
     function depositToMarket(address depositor, uint256 marketId, uint256 amount) external;
     function seedMarketLiquidity() external;
     function createProposal(uint256 marketId, bytes memory data) external;
-    function tradeProposal(uint256 proposalId, address trader, bool yesOrNo, bool zeroForOne, int256 amountIn)
+    function tradeProposal(uint256 proposalId, address trader, bool yesOrNo, bool zeroForOne, int256 amountIn, uint256  amountOutMin)
         external;
     function resolveMarket(uint256 marketId, bool yesOrNo, bytes memory proof) external;
     function redeemRewards(uint256 marketId, address user) external;

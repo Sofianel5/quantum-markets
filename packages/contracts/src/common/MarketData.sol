@@ -17,7 +17,7 @@ struct MarketConfig {
     uint256 id;
     uint256 createdAt;
     uint256 minDeposit;
-    uint256 strikePrice;
+    int256 strikePrice;
     address creator;
     address marketToken;
     address resolver;

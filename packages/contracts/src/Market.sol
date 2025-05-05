@@ -8,13 +8,16 @@ import {IMarketResolver} from "./interfaces/IMarketResolver.sol";
 import {MarketStatus, MarketConfig, ProposalConfig} from "./common/MarketData.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {Commands} from "@uniswap/universal-router/contracts/libraries/Commands.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/PoolManager.sol";
 import {ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
-import {IV4Router} from "@uniswap/v4-periphery/contracts/interfaces/IV4Router.sol";
+import {IV4Router} from "@uniswap/v4-periphery/src/interfaces/IV4Router.sol";
+import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
+import {IPermit2} from "@uniswap/permit2/src/interfaces/IPermit2.sol";
 import {DecisionToken, TokenType, VUSD} from "./Tokens.sol";
 
 contract Market is IMarket, Ownable {
@@ -100,7 +103,7 @@ contract Market is IMarket, Ownable {
         address marketToken,
         address resolver,
         uint256 minDeposit,
-        uint256 strikePrice,
+        int256 strikePrice,
         string memory title
     ) external returns (uint256 marketId) {
         marketId = id.getId();
@@ -204,9 +207,14 @@ contract Market is IMarket, Ownable {
         emit ProposalCreated(marketId, proposalId, block.timestamp, msg.sender);
     }
 
-    function tradeProposal(uint256 proposalId, address trader, bool yesOrNo, bool zeroForOne, int256 amountIn, uint256  amountOutMin)
-        external
-    {
+    function tradeProposal(
+        uint256 proposalId,
+        address trader,
+        bool yesOrNo,
+        bool zeroForOne,
+        int256 amountIn,
+        uint256 amountOutMin
+    ) external {
         ProposalConfig memory proposal = proposals[proposalId];
         MarketConfig memory marketConfig = markets[proposal.marketId];
         if (
@@ -218,21 +226,47 @@ contract Market is IMarket, Ownable {
         ) {
             revert ProposalNotTradable();
         }
-        
 
-        if (yesOrNo && zeroForOne && amount0 != 0) {
-            int256 yesPrice = (amount1 * 1e18) / amount0;
+        if (yesOrNo && zeroForOne) {
+            int256 yesPrice;
             MaxProposal memory currentMax = marketMax[proposal.marketId];
             if (yesPrice > currentMax.yesPrice && currentMax.proposalId != proposalId) {
                 marketMax[proposal.marketId] = MaxProposal({yesPrice: yesPrice, proposalId: proposalId});
             }
             if (yesPrice > marketConfig.strikePrice) {
-                graduateMarket(proposalId);
+                _graduateMarket(proposalId);
             }
         }
     }
 
-    function graduateMarket(uint256 proposalId) internal {
+    function _routerSwap(address user, PoolKey memory key, bool zeroForOne, uint128 amountIn, uint128 amountOutMin) internal {
+        Currency inCur = zeroForOne ? key.currency0 : key.currency1;
+        IERC20(Currency.unwrap(inCur)).transferFrom(msg.sender, address(this), amountIn);
+        IERC20(Currency.unwrap(inCur)).approve(permit2, amountIn);
+        IPermit2(permit2).approve(Currency.unwrap(inCur), address(v4Router), amountIn, uint48(block.timestamp));
+
+        bytes memory actions =
+            abi.encodePacked(uint8(Actions.SWAP_EXACT_IN_SINGLE), uint8(Actions.SETTLE_ALL), uint8(Actions.TAKE_ALL));
+        bytes1 memory params;
+        params[0] = abi.encode(
+            IV4Router.ExactInputSingleParams({
+                poolKey: key,
+                zeroForOne: zeroForOne,
+                amountIn: amountIn,
+                amountOutMinimum: amountOutMin,
+                hookData: ""
+            })
+        );
+        params[1] = abi.encode(inCur, amountIn); // SETTLE_ALL
+        params[2] = abi.encode( // TAKE_ALL
+        zeroForOne ? key.currency1 : key.currency0, amountOutMin);
+        bytes memory inputs;
+        inputs[0] = abi.encode(actions, params);
+        bytes memory command = abi.encodePacked(uint8(Commands.V4_SWAP));
+        v4Router.execute(command, inputs, block.timestamp);
+    }
+
+    function _graduateMarket(uint256 proposalId) internal {
         ProposalConfig memory proposalConfig = proposals[proposalId];
         MarketConfig storage marketConfig = markets[proposalConfig.marketId];
         marketConfig.status = MarketStatus.PROPOSAL_ACCEPTED;

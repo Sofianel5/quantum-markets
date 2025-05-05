@@ -8,8 +8,9 @@ import {IMarketResolver} from "./interfaces/IMarketResolver.sol";
 import {MarketStatus, MarketConfig, ProposalConfig} from "./common/MarketData.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {Commands} from "@uniswap/universal-router/contracts/libraries/Commands.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Commands} from "@uniswap/universal-router/contracts/libraries/Commands.sol";
+import { UniversalRouter } from "@uniswap/universal-router/contracts/UniversalRouter.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/PoolManager.sol";
 import {ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -23,7 +24,7 @@ import {DecisionToken, TokenType, VUSD} from "./Tokens.sol";
 contract Market is IMarket, Ownable {
     Id public id;
     IPoolManager public immutable poolManager;
-    IV4Router public immutable v4Router;
+    UniversalRouter public immutable router;
     address public immutable permit2;
     OnlyMarketSwapHook public immutable hook;
 
@@ -239,7 +240,9 @@ contract Market is IMarket, Ownable {
         }
     }
 
-    function _routerSwap(address user, PoolKey memory key, bool zeroForOne, uint128 amountIn, uint128 amountOutMin) internal {
+    function _routerSwap(address user, PoolKey memory key, bool zeroForOne, uint128 amountIn, uint128 amountOutMin)
+        internal
+    {
         Currency inCur = zeroForOne ? key.currency0 : key.currency1;
         IERC20(Currency.unwrap(inCur)).transferFrom(msg.sender, address(this), amountIn);
         IERC20(Currency.unwrap(inCur)).approve(permit2, amountIn);
@@ -247,7 +250,7 @@ contract Market is IMarket, Ownable {
 
         bytes memory actions =
             abi.encodePacked(uint8(Actions.SWAP_EXACT_IN_SINGLE), uint8(Actions.SETTLE_ALL), uint8(Actions.TAKE_ALL));
-        bytes1 memory params;
+        bytes[] memory params = new bytes[](3);
         params[0] = abi.encode(
             IV4Router.ExactInputSingleParams({
                 poolKey: key,
@@ -258,12 +261,11 @@ contract Market is IMarket, Ownable {
             })
         );
         params[1] = abi.encode(inCur, amountIn); // SETTLE_ALL
-        params[2] = abi.encode( // TAKE_ALL
-        zeroForOne ? key.currency1 : key.currency0, amountOutMin);
-        bytes memory inputs;
+        params[2] = abi.encode(zeroForOne ? key.currency1 : key.currency0, amountOutMin); // TAKE_ALL
+        bytes[] memory inputs = new bytes[](1);
         inputs[0] = abi.encode(actions, params);
         bytes memory command = abi.encodePacked(uint8(Commands.V4_SWAP));
-        v4Router.execute(command, inputs, block.timestamp);
+        router.execute(command, inputs, block.timestamp);
     }
 
     function _graduateMarket(uint256 proposalId) internal {

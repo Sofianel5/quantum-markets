@@ -2,22 +2,23 @@
 pragma solidity ^0.8.26;
 
 import {Id} from "./Id.sol";
+import {OnlyMarketSwapHook} from "./OnlyMarketSwapHook.sol";
 import {IMarket} from "./interfaces/IMarket.sol";
 import {IMarketResolver} from "./interfaces/IMarketResolver.sol";
 import {MarketStatus, MarketConfig, ProposalConfig} from "./common/MarketData.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IUniswapV3Factory} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
-import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
-import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
-import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/PoolManager.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {DecisionToken, TokenType, VUSD} from "./Tokens.sol";
 
 contract Market is IMarket, Ownable {
     Id public id;
-    IUniswapV3Factory public uniV3Factory;
-    INonfungiblePositionManager public nonfungiblePositionManager;
+    IPoolManager public immutable poolManager;
+    OnlyMarketSwapHook public immutable hook;
 
     uint24 public POOL_FEE = 3000;
 
@@ -42,11 +43,9 @@ contract Market is IMarket, Ownable {
     mapping(uint256 => mapping(address => uint256)) proposalDepositClaims;
     mapping(uint256 => mapping(address => bool)) claims;
 
-    constructor(address admin, IUniswapV3Factory _factory, INonfungiblePositionManager _positionManager)
-        Ownable(admin)
-    {
-        uniV3Factory = _factory;
-        nonfungiblePositionManager = _positionManager;
+    constructor(address admin, IPoolManager _pm) Ownable(admin) {
+        poolManager = _pm;
+        hook = new OnlyMarketSwapHook(_pm, address(this));
     }
 
     function changeFee(uint24 newFee) external onlyOwner {
@@ -138,41 +137,47 @@ contract Market is IMarket, Ownable {
 
         mintYesNo(marketId, marketConfig.minDeposit / 2);
 
-        IUniswapV3Pool yesPool = IUniswapV3Pool(uniV3Factory.createPool(address(yesToken), address(vUSD), POOL_FEE));
-        IUniswapV3Pool noPool = IUniswapV3Pool(uniV3Factory.createPool(address(noToken), address(vUSD), POOL_FEE));
-
-        yesPool.initialize(TickMath.getSqrtRatioAtTick(0));
-        noPool.initialize(TickMath.getSqrtRatioAtTick(0));
-
-        nonfungiblePositionManager.mint(
-            INonfungiblePositionManager.MintParams({
-                token0: address(yesToken),
-                token1: address(vUSD),
-                fee: POOL_FEE,
-                tickLower: TickMath.MIN_TICK,
-                tickUpper: TickMath.MAX_TICK,
-                amount0Desired: marketConfig.minDeposit / 4,
-                amount1Desired: marketConfig.minDeposit / 4,
-                amount0Min: 0,
-                amount1Min: 0,
-                recipient: address(this),
-                deadline: block.timestamp + 15
-            })
+        PoolKey memory yesPoolKey = PoolKey({
+            currency0: Currency.wrap(address(yesToken)),
+            currency1: Currency.wrap(address(vUSD)),
+            fee: POOL_FEE,
+            tickSpacing: 60,
+            hooks: hook
+        });
+        poolManager.initializePool(
+            yesPoolKey,
+            TickMath.getSqrtRatioAtTick(TickMath.MIN_TICK + 1) // ≈ 0 price
         );
-        nonfungiblePositionManager.mint(
-            INonfungiblePositionManager.MintParams({
-                token0: address(noToken),
-                token1: address(vUSD),
-                fee: POOL_FEE,
+        PoolKey memory noPoolKey = PoolKey({
+            currency0: Currency.wrap(address(noToken)),
+            currency1: Currency.wrap(address(vUSD)),
+            fee: POOL_FEE,
+            tickSpacing: 60,
+            hooks: hook
+        });
+        poolManager.initializePool(
+            noPoolKey,
+            TickMath.getSqrtRatioAtTick(0) // 1:1 price
+        );
+
+        poolManager.modifyPosition(
+            yesPoolKey,
+            IPoolManager.ModifyPositionParams({
                 tickLower: TickMath.MIN_TICK,
                 tickUpper: TickMath.MAX_TICK,
-                amount0Desired: marketConfig.minDeposit - marketConfig.minDeposit / 4,
-                amount1Desired: marketConfig.minDeposit - marketConfig.minDeposit / 4,
-                amount0Min: 0,
-                amount1Min: 0,
-                recipient: address(this),
-                deadline: block.timestamp + 15
-            })
+                liquidityDelta: int256(marketConfig.minDeposit / 4)
+            }),
+            ""
+        );
+
+        poolManager.modifyPosition(
+            noPoolKey,
+            IPoolManager.ModifyPositionParams({
+                tickLower: TickMath.MIN_TICK,
+                tickUpper: TickMath.MAX_TICK,
+                liquidityDelta: int256((marketConfig.minDeposit * 3) / 4)
+            }),
+            ""
         );
 
         proposals[proposalId] = ProposalConfig({
@@ -182,8 +187,8 @@ contract Market is IMarket, Ownable {
             vUSD: vUSD,
             yesToken: yesToken,
             noToken: noToken,
-            yesPool: yesPool,
-            noPool: noPool,
+            yesPoolKey: yesPoolKey,
+            noPoolKey: noPoolKet,
             data: data
         });
 

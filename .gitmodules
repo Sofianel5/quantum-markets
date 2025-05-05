@@ -4,9 +4,3 @@
 [submodule "packages/contracts/lib/openzeppelin-contracts"]
 	path = packages/contracts/lib/openzeppelin-contracts
 	url = https://github.com/OpenZeppelin/openzeppelin-contracts
-[submodule "packages/contracts/lib/v3-core"]
-	path = packages/contracts/lib/v3-core
-	url = https://github.com/uniswap/v3-core
-[submodule "packages/contracts/lib/v3-periphery"]
-	path = packages/contracts/lib/v3-periphery
-	url = https://github.com/uniswap/v3-periphery

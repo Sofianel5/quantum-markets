@@ -3,7 +3,7 @@ pragma solidity >=0.8.26;
 
 import {IMarketResolver} from "../interfaces/IMarketResolver.sol";
 import {DecisionToken, VUSD} from "../Tokens.sol";
-import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
 enum MarketStatus {
     OPEN,
@@ -33,7 +33,7 @@ struct ProposalConfig {
     VUSD vUSD;
     DecisionToken yesToken;
     DecisionToken noToken;
-    IUniswapV3Pool yesPool;
-    IUniswapV3Pool noPool;
+    PoolKey yesPoolKey;
+    PoolKey noPoolKey;
     bytes data;
 }

@@ -246,7 +246,7 @@ contract Market is IMarket, Ownable {
         Currency inCur = zeroForOne ? key.currency0 : key.currency1;
         IERC20(Currency.unwrap(inCur)).transferFrom(msg.sender, address(this), amountIn);
         IERC20(Currency.unwrap(inCur)).approve(permit2, amountIn);
-        IPermit2(permit2).approve(Currency.unwrap(inCur), address(v4Router), amountIn, uint48(block.timestamp));
+        IPermit2(permit2).approve(Currency.unwrap(inCur), address(router), amountIn, uint48(block.timestamp));
 
         bytes memory actions =
             abi.encodePacked(uint8(Actions.SWAP_EXACT_IN_SINGLE), uint8(Actions.SETTLE_ALL), uint8(Actions.TAKE_ALL));
@@ -284,8 +284,6 @@ contract Market is IMarket, Ownable {
         } else {
             market.status = MarketStatus.RESOLVED_NO;
         }
-        market.yesPool.collect(owner(), TickMath.MIN_TICK, TickMath.TICK_MAX, type(uint128).max, type(uint128).max);
-        market.noPool.collect(owner(), TickMath.MIN_TICK, TickMath.TICK_MAX, type(uint128).max, type(uint128).max);
 
         emit MarketSettled(marketId, yesOrNo);
     }
@@ -300,7 +298,7 @@ contract Market is IMarket, Ownable {
         } else if (market.status == MarketStatus.RESOLVED_NO) {
             uint256 winningProposalId = acceptedProposals[marketId];
             ProposalConfig memory proposal = proposals[winningProposalId];
-            tradingRewards = market.noToken.balanceOf(user);
+            tradingRewards = proposal.noToken.balanceOf(user);
         } else {
             revert MarketNotSettled();
         }

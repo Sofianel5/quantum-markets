@@ -12,6 +12,7 @@ import {Permit2} from "@uniswap/permit2/src/Permit2.sol";
 import {RouterParameters} from "@uniswap/universal-router/contracts/types/RouterParameters.sol";
 import {Deployers} from "@uniswap/v4-core/test/utils/Deployers.sol";
 import {Market} from "../../src/Market.sol";
+import {MarketUtilsSwapHook} from "../../src/MarketUtilsSwapHook.sol";
 import {MarketStatus} from "../../src/common/MarketData.sol";
 import {VUSD, DecisionToken} from "../../src/Tokens.sol";
 import {BasicMarketResolver} from "../../src/BasicMarketResolver.sol";
@@ -52,6 +53,7 @@ contract MarketE2ETest is Test, PosmTestSetup {
         );
         bytes memory constructorArgs = abi.encode(manager, market);
         deployCodeTo("MarketUtilsSwapHook.sol:MarketUtilsSwapHook", constructorArgs, flags);
+        MarketUtilsSwapHook(flags).addRouter(address(router));
         console.log(address(lpm));
         market = new Market(
             address(this), // admin

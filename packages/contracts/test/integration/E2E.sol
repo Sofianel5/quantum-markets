@@ -3,6 +3,11 @@ pragma solidity ^0.8.26;
 
 import {Test, console} from "forge-std/Test.sol";
 import {DeployPermit2} from "../forks/DeployPermit2.sol";
+import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
+import {Commands} from "@uniswap/universal-router/contracts/libraries/Commands.sol";
+import {IV4Router} from "@uniswap/v4-periphery/src/interfaces/IV4Router.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {UniversalRouter} from "@uniswap/universal-router/contracts/UniversalRouter.sol";
 import {PoolManager} from "@uniswap/v4-core/src/PoolManager.sol";
@@ -11,6 +16,7 @@ import {PositionDescriptor} from "@uniswap/v4-periphery/src/PositionDescriptor.s
 import {Permit2} from "@uniswap/permit2/src/Permit2.sol";
 import {RouterParameters} from "@uniswap/universal-router/contracts/types/RouterParameters.sol";
 import {Deployers} from "@uniswap/v4-core/test/utils/Deployers.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Market} from "../../src/Market.sol";
 import {MarketUtilsSwapHook} from "../../src/MarketUtilsSwapHook.sol";
 import {MarketStatus} from "../../src/common/MarketData.sol";
@@ -99,7 +105,7 @@ contract MarketE2ETest is Test, PosmTestSetup {
 
         /* 4.  ALICE buys YES heavily to push TWAP above strike */
         /*      For the dummy pool manager this always succeeds and ticks jump instantly */
-        (uint256 proposalId,,,, VUSD vUSD, DecisionToken yesToken, DecisionToken noToken,,,) = market.proposals(2); // first proposal
+        (uint256 proposalId,,,, VUSD vUSD, DecisionToken yesToken, DecisionToken noToken, PoolKey memory yesPoolKey,,) = market.proposals(2); // first proposal
         vm.startPrank(alice);
         market.claimVirtualTokenForProposal(alice, 2); // Now she has 1,500 vUSD
         assertEq(vUSD.balanceOf(alice), 1_500e18);
@@ -107,7 +113,29 @@ contract MarketE2ETest is Test, PosmTestSetup {
         market.mintYesNo(2, 750e18);
         yesToken.approve(address(market), type(uint256).max);
         noToken.approve(address(market), type(uint256).max);
-        // market.tradeProposal(proposalId, true, /*yes pool*/ true, /*zeroForOne*/ 750e18, 0);
+        uint256 amountIn = 750e18;
+        Currency inCur = address(yesToken) == Currency.unwrap(yesPoolKey.currency0) ? yesPoolKey.currency0 : yesPoolKey.currency1;
+        IERC20(Currency.unwrap(inCur)).approve(address(permit2), amountIn);
+        permit2.approve(Currency.unwrap(inCur), address(router), uint160(amountIn), uint48(block.timestamp));
+        bytes memory actions =
+            abi.encodePacked(uint8(Actions.SWAP_EXACT_IN_SINGLE), uint8(Actions.SETTLE_ALL), uint8(Actions.TAKE_ALL));
+            bytes[] memory params = new bytes[](3);
+        bool zeroForOne = address(yesToken) == Currency.unwrap(yesPoolKey.currency0) ? true : false;
+        params[0] = abi.encode(
+            IV4Router.ExactInputSingleParams({
+                poolKey: yesPoolKey,
+                zeroForOne: zeroForOne,
+                amountIn: uint128(amountIn),
+                amountOutMinimum: uint128(0),
+                hookData: ""
+            })
+        );
+        params[1] = abi.encode(inCur, amountIn); // SETTLE_ALL
+        params[2] = abi.encode(zeroForOne ? yesPoolKey.currency1 : yesPoolKey.currency0, 0); // TAKE_ALL
+        bytes[] memory inputs = new bytes[](1);
+        inputs[0] = abi.encode(actions, params);
+        bytes memory command = abi.encodePacked(uint8(Commands.V4_SWAP));
+        router.execute(command, inputs, block.timestamp);
         vm.stopPrank();
 
         // /* 5.  Market should now be graduated */

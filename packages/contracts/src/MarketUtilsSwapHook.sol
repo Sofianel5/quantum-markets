@@ -11,6 +11,7 @@ import {BalanceDelta, toBalanceDelta} from "@uniswap/v4-core/src/types/BalanceDe
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IMarket} from "./interfaces/IMarket.sol";
 import "forge-std/console.sol";
 
 interface IMsgSender {
@@ -59,21 +60,30 @@ contract MarketUtilsSwapHook is BaseHook, Ownable {
         });
     }
 
-    function _beforeSwap(address sender, PoolKey calldata, SwapParams calldata, bytes calldata)
+    function _beforeSwap(address sender, PoolKey calldata key, SwapParams calldata, bytes calldata)
         internal
-        view
         override
         returns (bytes4, BeforeSwapDelta, uint24)
     {
-        if (!initialized) revert("not-initialized");
-        if (verifiedRouters[sender]) {
-            address swapper = IMsgSender(sender).msgSender();
-            console.log("Swap initiated by account:", swapper);
-            if (swapper != market) revert("not-market");
-        } else {
-            revert("invalid-router");
-        }
+        IMarket(market).validateSwap(key);
         return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+    }
+
+    function getPrice(PoolKey calldata key, uint32 secondsAgo) public view returns (int24 avgTick) {
+        require(secondsAgo != 0, "secondsAgo=0");
+        PoolId id = PoolIdLibrary.toId(key);
+
+        Obs storage o = lastObs[id];
+        require(o.time != 0, "no obs yet");
+
+        uint32 dtNow = uint32(block.timestamp) - o.time;
+        int56 tickCumulativeNow = o.tickCumulative + int56(o.lastTick) * int56(uint56(dtNow));
+
+        require(secondsAgo <= dtNow, "window > stored span");
+
+        int56 tickCumulativeAgo = tickCumulativeNow - int56(o.lastTick) * int56(uint56(secondsAgo));
+
+        avgTick = int24((tickCumulativeNow - tickCumulativeAgo) / int56(uint56(secondsAgo)));
     }
 
     function _afterSwap(address, PoolKey calldata key, SwapParams calldata, BalanceDelta, bytes calldata)
@@ -91,24 +101,11 @@ contract MarketUtilsSwapHook is BaseHook, Ownable {
         }
         o.time = now32;
         o.lastTick = tick;
+
+        try MarketUtilsSwapHook(address(this)).getPrice(key, 30) returns (int24 avgTick) {
+            IMarket(market).updatePostSwap(key, avgTick);
+        } catch {}
         return (BaseHook.afterSwap.selector, 0);
-    }
-
-    function consult(PoolKey calldata key, uint32 secondsAgo) external view returns (int24 avgTick) {
-        require(secondsAgo != 0, "secondsAgo=0");
-        PoolId id = PoolIdLibrary.toId(key);
-
-        Obs storage o = lastObs[id];
-        require(o.time != 0, "no obs yet");
-
-        uint32 dtNow = uint32(block.timestamp) - o.time;
-        int56 tickCumulativeNow = o.tickCumulative + int56(o.lastTick) * int56(uint56(dtNow));
-
-        require(secondsAgo <= dtNow, "window > stored span");
-
-        int56 tickCumulativeAgo = tickCumulativeNow - int56(o.lastTick) * int56(uint56(secondsAgo));
-
-        avgTick = int24((tickCumulativeNow - tickCumulativeAgo) / int56(uint56(secondsAgo)));
     }
 
     function addRouter(address _router) external onlyOwner {

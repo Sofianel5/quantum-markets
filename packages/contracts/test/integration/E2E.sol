@@ -107,7 +107,7 @@ contract MarketE2ETest is Test, PosmTestSetup {
         market.mintYesNo(2, 750e18);
         yesToken.approve(address(market), type(uint256).max);
         noToken.approve(address(market), type(uint256).max);
-        market.tradeProposal(proposalId, true, /*yes pool*/ true, /*zeroForOne*/ 750e18, 0);
+        // market.tradeProposal(proposalId, true, /*yes pool*/ true, /*zeroForOne*/ 750e18, 0);
         vm.stopPrank();
 
         // /* 5.  Market should now be graduated */

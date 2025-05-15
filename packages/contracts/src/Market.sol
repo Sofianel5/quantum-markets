@@ -27,6 +27,7 @@ import {IPermit2} from "@uniswap/permit2/src/interfaces/IPermit2.sol";
 import {IAllowanceTransfer} from "@uniswap/permit2/src/interfaces/IAllowanceTransfer.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {UniswapV2Library} from "@uniswap/universal-router/contracts/modules/uniswap/v2/UniswapV2Library.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {FixedPointMathLib} from "solmate/src/utils/FixedPointMathLib.sol";
 import {DecisionToken, TokenType, VUSD} from "./Tokens.sol";
 
@@ -61,14 +62,16 @@ contract Market is IMarket, Ownable {
     mapping(uint256 => uint256) public acceptedProposals;
     mapping(uint256 => mapping(address => uint256)) public deposits;
     mapping(uint256 => mapping(address => uint256)) public proposalDepositClaims;
+    mapping(PoolId => uint256) poolToProposal;
 
-    constructor(
-        address admin,
-        address _positionManager,
-        address payable _router,
-        address _permit2,
-        address _swapHook
-    ) Ownable(admin) {
+    modifier onlyHook() {
+        require(msg.sender == address(hook), "must be hook");
+        _;
+    }
+
+    constructor(address admin, address _positionManager, address payable _router, address _permit2, address _swapHook)
+        Ownable(admin)
+    {
         id = new Id();
         positionManager = IPositionManager(_positionManager);
         router = UniversalRouter(_router);
@@ -145,8 +148,6 @@ contract Market is IMarket, Ownable {
         emit MarketCreated(marketId, block.timestamp, creator, title);
     }
 
-    function seedMarketLiquidity() external {}
-
     function createProposal(uint256 marketId, bytes memory data) external {
         MarketConfig memory marketConfig = markets[marketId];
         uint256 proposalId = id.getId();
@@ -185,6 +186,9 @@ contract Market is IMarket, Ownable {
             _initializePoolWithLiquidity(address(yesToken), address(vUSD), tokenPerPool, vusdPerPool);
         PoolKey memory noPoolKey =
             _initializePoolWithLiquidity(address(noToken), address(vUSD), tokenPerPool, vusdPerPool);
+
+        poolToProposal[PoolIdLibrary.toId(yesPoolKey)] = proposalId;
+        poolToProposal[PoolIdLibrary.toId(noPoolKey)] = proposalId;
 
         // ─── record proposal ───────────────────────────────────────────────────────
         proposals[proposalId] = ProposalConfig({
@@ -284,26 +288,23 @@ contract Market is IMarket, Ownable {
         );
     }
 
-    function tradeProposal(uint256 proposalId, bool yesThenNo, bool zeroForOne, uint256 amountIn, uint256 amountOutMin)
-        external
-    {
+    function validateSwap(PoolKey calldata poolKey) external onlyHook {
+        uint256 proposalId = poolToProposal[PoolIdLibrary.toId(poolKey)];
         ProposalConfig memory proposal = proposals[proposalId];
         MarketConfig memory marketConfig = markets[proposal.marketId];
-        PoolKey memory key = yesThenNo ? proposal.yesPoolKey : proposal.noPoolKey;
-        if (
-            marketConfig.status != MarketStatus.OPEN
-                || (
-                    marketConfig.status == MarketStatus.PROPOSAL_ACCEPTED
-                        && acceptedProposals[proposal.marketId] == proposalId
-                )
-        ) {
+        if (marketConfig.status != MarketStatus.OPEN) {
             revert ProposalNotTradable();
         }
+    }
 
-        _routerSwap(msg.sender, key, zeroForOne, amountIn, amountOutMin);
-
-        if (yesThenNo && zeroForOne) {
-            uint256 yesPrice = _twapX18(key);
+    function updatePostSwap(PoolKey calldata poolKey, int24 avgTick) external onlyHook {
+        PoolId poolId = PoolIdLibrary.toId(poolKey);
+        uint256 proposalId = poolToProposal[poolId];
+        ProposalConfig memory proposal = proposals[proposalId];
+        MarketConfig storage marketConfig = markets[proposal.marketId];
+        PoolId yesPoolId = PoolIdLibrary.toId(proposal.yesPoolKey);
+        if (PoolId.unwrap(poolId) == PoolId.unwrap(yesPoolId)) {
+            uint256 yesPrice = _priceFromTick(avgTick);
             MaxProposal memory currentMax = marketMax[proposal.marketId];
             if (yesPrice > currentMax.yesPrice && currentMax.proposalId != proposalId) {
                 marketMax[proposal.marketId] = MaxProposal({yesPrice: yesPrice, proposalId: proposalId});
@@ -314,44 +315,10 @@ contract Market is IMarket, Ownable {
         }
     }
 
-    function _routerSwap(address user, PoolKey memory key, bool zeroForOne, uint256 amountIn, uint256 amountOutMin)
-        internal
-    {
-        Currency inCur = zeroForOne ? key.currency0 : key.currency1;
-        IERC20(Currency.unwrap(inCur)).transferFrom(user, address(this), amountIn);
-        IERC20(Currency.unwrap(inCur)).approve(address(permit2), amountIn);
-        require(amountIn <= type(uint160).max, "amount too large");
-        permit2.approve(Currency.unwrap(inCur), address(router), uint160(amountIn), uint48(block.timestamp));
-
-        bytes memory actions =
-            abi.encodePacked(uint8(Actions.SWAP_EXACT_IN_SINGLE), uint8(Actions.SETTLE_ALL), uint8(Actions.TAKE_ALL));
-        bytes[] memory params = new bytes[](3);
-        params[0] = abi.encode(
-            IV4Router.ExactInputSingleParams({
-                poolKey: key,
-                zeroForOne: zeroForOne,
-                amountIn: uint128(amountIn),
-                amountOutMinimum: uint128(amountOutMin),
-                hookData: ""
-            })
-        );
-        params[1] = abi.encode(inCur, amountIn); // SETTLE_ALL
-        params[2] = abi.encode(zeroForOne ? key.currency1 : key.currency0, amountOutMin); // TAKE_ALL
-        bytes[] memory inputs = new bytes[](1);
-        inputs[0] = abi.encode(actions, params);
-        bytes memory command = abi.encodePacked(uint8(Commands.V4_SWAP));
-        router.execute(command, inputs, block.timestamp);
-    }
-
     function _priceFromTick(int24 tick) internal pure returns (uint256) {
         uint160 sqrtP = TickMath.getSqrtPriceAtTick(tick);
         uint256 p192 = uint256(sqrtP) * uint256(sqrtP);
         return (p192 * 1e18) >> 192;
-    }
-
-    function _twapX18(PoolKey memory key) internal view returns (uint256) {
-        int24 avgTick = hook.consult(key, TWAP_WINDOW);
-        return _priceFromTick(avgTick);
     }
 
     function _graduateMarket(uint256 proposalId) internal {

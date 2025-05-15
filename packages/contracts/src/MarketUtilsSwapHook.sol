@@ -10,8 +10,14 @@ import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/Pool
 import {BalanceDelta, toBalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import "forge-std/console.sol";
 
-contract MarketUtilsSwapHook is BaseHook {
+interface IMsgSender {
+    function msgSender() external view returns (address);
+}
+
+contract MarketUtilsSwapHook is BaseHook, Ownable {
     using StateLibrary for IPoolManager;
 
     address public market;
@@ -24,16 +30,15 @@ contract MarketUtilsSwapHook is BaseHook {
     }
 
     mapping(PoolId poolId => Obs) public lastObs;
+    mapping(address swapRouter => bool approved) public verifiedRouters;
 
-    constructor(IPoolManager pm) BaseHook(pm) {}
+    constructor(IPoolManager pm) BaseHook(pm) Ownable(msg.sender) {}
 
     function initialize(address _market) external {
         require(!initialized, "Contract instance has already been initialized");
         initialized = true;
         market = _market;
     }
-
-    function validateHookAddress(BaseHook _this) internal pure override {}
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
@@ -43,7 +48,7 @@ contract MarketUtilsSwapHook is BaseHook {
             afterAddLiquidity: false,
             beforeRemoveLiquidity: false,
             afterRemoveLiquidity: false,
-            beforeSwap: false,
+            beforeSwap: true,
             afterSwap: true,
             beforeDonate: false,
             afterDonate: false,
@@ -61,7 +66,13 @@ contract MarketUtilsSwapHook is BaseHook {
         returns (bytes4, BeforeSwapDelta, uint24)
     {
         if (!initialized) revert("not-initialized");
-        if (sender != market) revert("not-market");
+        if (verifiedRouters[sender]) {
+            address swapper = IMsgSender(sender).msgSender();
+            console.log("Swap initiated by account:", swapper);
+            if (swapper != market) revert("not-market");
+        } else {
+            revert("invalid-router");
+        }
         return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
 
@@ -98,5 +109,19 @@ contract MarketUtilsSwapHook is BaseHook {
         int56 tickCumulativeAgo = tickCumulativeNow - int56(o.lastTick) * int56(uint56(secondsAgo));
 
         avgTick = int24((tickCumulativeNow - tickCumulativeAgo) / int56(uint56(secondsAgo)));
+    }
+
+    function addRouter(address _router) external onlyOwner {
+        verifiedRouters[_router] = true;
+        console.log("Router added:", _router);
+    }
+
+    function removeRouter(address _router) external onlyOwner {
+        verifiedRouters[_router] = false;
+        console.log("Router removed:", _router);
+    }
+
+    function isVerifiedRouter(address _router) external view returns (bool) {
+        return verifiedRouters[_router];
     }
 }

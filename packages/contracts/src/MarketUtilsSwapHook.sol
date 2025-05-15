@@ -1,4 +1,4 @@
-// SPDX‑License‑Identifier: GPL‑3.0‑or‑later
+// SPDX-License-Identifier: All Rights Reserved
 pragma solidity ^0.8.26;
 
 import {BaseHook} from "@uniswap/v4-periphery/src/utils/BaseHook.sol";
@@ -6,29 +6,35 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/PoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
-import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
-import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {BalanceDelta, toBalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 
 contract MarketUtilsSwapHook is BaseHook {
     using StateLibrary for IPoolManager;
 
-    address public immutable market;
+    address public market;
+    bool private initialized;
 
     struct Obs {
         uint32 time;
         int56 tickCumulative;
-        int24  lastTick;
+        int24 lastTick;
     }
 
     mapping(PoolId poolId => Obs) public lastObs;
 
-    constructor(IPoolManager pm, address _market) BaseHook(pm) {
+    constructor(IPoolManager pm) BaseHook(pm) {}
+
+    function initialize(address _market) external {
+        require(!initialized, "Contract instance has already been initialized");
+        initialized = true;
         market = _market;
     }
 
-    /* advertise the callbacks we implement */
+    function validateHookAddress(BaseHook _this) internal pure override {}
+
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
             beforeInitialize: false,
@@ -37,7 +43,7 @@ contract MarketUtilsSwapHook is BaseHook {
             afterAddLiquidity: false,
             beforeRemoveLiquidity: false,
             afterRemoveLiquidity: false,
-            beforeSwap: true,
+            beforeSwap: false,
             afterSwap: true,
             beforeDonate: false,
             afterDonate: false,
@@ -54,6 +60,7 @@ contract MarketUtilsSwapHook is BaseHook {
         override
         returns (bytes4, BeforeSwapDelta, uint24)
     {
+        if (!initialized) revert("not-initialized");
         if (sender != market) revert("not-market");
         return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }

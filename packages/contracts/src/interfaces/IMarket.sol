@@ -15,13 +15,8 @@ interface IMarket {
     function depositToMarket(address depositor, uint256 marketId, uint256 amount) external;
     function seedMarketLiquidity() external;
     function createProposal(uint256 marketId, bytes memory data) external;
-    function tradeProposal(
-        uint256 proposalId,
-        bool yesOrNo,
-        bool zeroForOne,
-        uint256 amountIn,
-        uint256 amountOutMin
-    ) external;
+    function tradeProposal(uint256 proposalId, bool yesOrNo, bool zeroForOne, uint256 amountIn, uint256 amountOutMin)
+        external;
     function resolveMarket(uint256 marketId, bool yesOrNo, bytes memory proof) external;
     function redeemRewards(uint256 marketId, address user) external;
 }

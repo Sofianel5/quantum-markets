@@ -11,7 +11,11 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Commands} from "@uniswap/universal-router/contracts/libraries/Commands.sol";
 import {UniversalRouter} from "@uniswap/universal-router/contracts/UniversalRouter.sol";
+import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
+import {SafeCallback} from "@uniswap/v4-periphery/src/base/SafeCallback.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/PoolManager.sol";
+import {IPoolInitializer_v4} from "@uniswap/v4-periphery/src/interfaces/IPoolInitializer_v4.sol";
+import {IPositionManager} from "@uniswap/v4-periphery/src/PositionManager.sol";
 import {ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -20,14 +24,17 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IV4Router} from "@uniswap/v4-periphery/src/interfaces/IV4Router.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {IPermit2} from "@uniswap/permit2/src/interfaces/IPermit2.sol";
+import {IAllowanceTransfer} from "@uniswap/permit2/src/interfaces/IAllowanceTransfer.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {UniswapV2Library} from "@uniswap/universal-router/contracts/modules/uniswap/v2/UniswapV2Library.sol";
+import {FixedPointMathLib} from "solmate/src/utils/FixedPointMathLib.sol";
 import {DecisionToken, TokenType, VUSD} from "./Tokens.sol";
 
 contract Market is IMarket, Ownable {
     using StateLibrary for IPoolManager;
 
     Id public id;
-    IPoolManager public immutable poolManager;
+    IPositionManager public immutable positionManager;
     UniversalRouter public immutable router;
     IPermit2 public immutable permit2;
     MarketUtilsSwapHook public immutable hook;
@@ -48,18 +55,26 @@ contract Market is IMarket, Ownable {
         uint256 proposalId;
     }
 
-    mapping(uint256 => MarketConfig) markets;
-    mapping(uint256 => MaxProposal) marketMax;
-    mapping(uint256 => ProposalConfig) proposals;
-    mapping(uint256 => uint256) acceptedProposals;
-    mapping(uint256 => mapping(address => uint256)) deposits;
-    mapping(uint256 => mapping(address => uint256)) proposalDepositClaims;
+    mapping(uint256 => MarketConfig) public markets;
+    mapping(uint256 => MaxProposal) public marketMax;
+    mapping(uint256 => ProposalConfig) public proposals;
+    mapping(uint256 => uint256) public acceptedProposals;
+    mapping(uint256 => mapping(address => uint256)) public deposits;
+    mapping(uint256 => mapping(address => uint256)) public proposalDepositClaims;
 
-    constructor(address admin, address payable _router, address _poolManager, address _permit2) Ownable(admin) {
+    constructor(
+        address admin,
+        address _positionManager,
+        address payable _router,
+        address _permit2,
+        address _swapHook
+    ) Ownable(admin) {
+        id = new Id();
+        positionManager = IPositionManager(_positionManager);
         router = UniversalRouter(_router);
-        poolManager = IPoolManager(_poolManager);
         permit2 = IPermit2(_permit2);
-        hook = new MarketUtilsSwapHook(poolManager, address(this));
+        hook = MarketUtilsSwapHook(_swapHook);
+        hook.initialize(address(this));
     }
 
     function changeFee(uint24 newFee) external onlyOwner {
@@ -134,70 +149,44 @@ contract Market is IMarket, Ownable {
 
     function createProposal(uint256 marketId, bytes memory data) external {
         MarketConfig memory marketConfig = markets[marketId];
-
         uint256 proposalId = id.getId();
-
-        VUSD vUSD = new VUSD(address(this));
 
         address depositor = msg.sender;
         uint256 totalDeposited = deposits[marketId][depositor];
         uint256 alreadyClaimed = proposalDepositClaims[proposalId][depositor];
         uint256 claimable = totalDeposited - alreadyClaimed;
 
-        require(claimable < marketConfig.minDeposit, "Must deposit min liquidity");
-        vUSD.mint(address(this), marketConfig.minDeposit);
+        require(marketConfig.minDeposit <= claimable, "Must deposit min liquidity");
         proposalDepositClaims[proposalId][depositor] += marketConfig.minDeposit;
+
+        // ─── split the deposit ──────────────────────────────────────────────────────
+        uint256 D = marketConfig.minDeposit;
+        uint256 burnTotal = (D * 2) / 3; // ⅔  → YES+NO tokens
+        uint256 tokenPerPool = burnTotal / 2; // each pool gets D/3 tokens
+        uint256 vusdToMint = D - burnTotal; // ⅓  → vUSD liquidity
+        uint256 vusdPerPool = vusdToMint / 2; // each pool gets D/6 vUSD
+
+        // ─── mint assets ───────────────────────────────────────────────────────────
+        VUSD vUSD = new VUSD(address(this));
+        vUSD.mint(address(this), vusdToMint);
 
         DecisionToken yesToken = new DecisionToken(TokenType.YES, address(this));
         DecisionToken noToken = new DecisionToken(TokenType.NO, address(this));
 
-        mintYesNo(marketId, marketConfig.minDeposit / 2);
+        // tokens that seed the pools stay in the contract…
+        yesToken.mint(address(this), tokenPerPool);
+        noToken.mint(address(this), tokenPerPool);
+        // …and the user receives their trading inventory
+        yesToken.mint(msg.sender, tokenPerPool);
+        noToken.mint(msg.sender, tokenPerPool);
 
-        PoolKey memory yesPoolKey = PoolKey({
-            currency0: Currency.wrap(address(yesToken)),
-            currency1: Currency.wrap(address(vUSD)),
-            fee: POOL_FEE,
-            tickSpacing: 60,
-            hooks: hook
-        });
-        poolManager.initialize(
-            yesPoolKey,
-            TickMath.getSqrtPriceAtTick(TickMath.MIN_TICK + 1) // ≈ 0 price
-        );
-        PoolKey memory noPoolKey = PoolKey({
-            currency0: Currency.wrap(address(noToken)),
-            currency1: Currency.wrap(address(vUSD)),
-            fee: POOL_FEE,
-            tickSpacing: 60,
-            hooks: hook
-        });
-        poolManager.initialize(
-            noPoolKey,
-            TickMath.getSqrtPriceAtTick(0) // 1:1 price
-        );
+        // ─── seed the two pools ────────────────────────────────────────────────────
+        PoolKey memory yesPoolKey =
+            _initializePoolWithLiquidity(address(yesToken), address(vUSD), tokenPerPool, vusdPerPool);
+        PoolKey memory noPoolKey =
+            _initializePoolWithLiquidity(address(noToken), address(vUSD), tokenPerPool, vusdPerPool);
 
-        poolManager.modifyLiquidity(
-            yesPoolKey,
-            ModifyLiquidityParams({
-                tickLower: TickMath.MIN_TICK,
-                tickUpper: TickMath.MAX_TICK,
-                liquidityDelta: int256(marketConfig.minDeposit / 4),
-                salt: 0
-            }),
-            ""
-        );
-
-        poolManager.modifyLiquidity(
-            noPoolKey,
-            ModifyLiquidityParams({
-                tickLower: TickMath.MIN_TICK,
-                tickUpper: TickMath.MAX_TICK,
-                liquidityDelta: int256((marketConfig.minDeposit * 3) / 4),
-                salt: 0
-            }),
-            ""
-        );
-
+        // ─── record proposal ───────────────────────────────────────────────────────
         proposals[proposalId] = ProposalConfig({
             id: proposalId,
             marketId: marketId,
@@ -212,6 +201,87 @@ contract Market is IMarket, Ownable {
         });
 
         emit ProposalCreated(marketId, proposalId, block.timestamp, msg.sender);
+    }
+
+    function _initializePoolWithLiquidity(
+        address tokenA, // decision token
+        address tokenB, // vUSD
+        uint256 budgetA, // decision tokens
+        uint256 budgetB // vUSD
+    ) internal returns (PoolKey memory) {
+        (address token0, address token1) = UniswapV2Library.sortTokens(tokenA, tokenB);
+
+        PoolKey memory key = PoolKey({
+            currency0: Currency.wrap(token0),
+            currency1: Currency.wrap(token1),
+            fee: POOL_FEE,
+            tickSpacing: 60,
+            hooks: hook
+        });
+
+        // ─── choose a tick range that brackets the launch price ──────────────────
+        int24 spacing = 60;
+        int24 tickLower;
+        int24 tickUpper;
+        uint256 priceX18;
+
+        if (token0 == tokenA) {
+            // decision / vUSD  (price ≤ 1)
+            tickLower = (TickMath.MIN_TICK / spacing) * spacing;
+            tickUpper = 0;
+            priceX18 = 0.5e18; // 0.5 vUSD per decision
+        } else {
+            // vUSD / decision  (price ≥ 1)
+            tickLower = 0;
+            tickUpper = (TickMath.MAX_TICK / spacing) * spacing;
+            priceX18 = 2e18; // 2 decision per vUSD
+        }
+
+        // snap launch tick to grid
+        uint256 priceX96 = (priceX18 * (1 << 96)) / 1e18; // Q96 price
+        uint160 sqrtPrice = uint160(FixedPointMathLib.sqrt(priceX96 << 96));
+        int24 launchTick = TickMath.getTickAtSqrtPrice(sqrtPrice);
+        int24 gridTick =
+            launchTick >= 0 ? (launchTick / spacing) * spacing : ((launchTick - (spacing - 1)) / spacing) * spacing; // round down for negatives
+        uint160 sqrtPriceX96 = TickMath.getSqrtPriceAtTick(gridTick);
+
+        uint160 sqrtLower = TickMath.getSqrtPriceAtTick(tickLower);
+        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(tickUpper);
+
+        // budgets in (token0, token1) order
+        uint256 amount0Max = (token0 == tokenA) ? budgetA : budgetB;
+        uint256 amount1Max = (token1 == tokenA) ? budgetA : budgetB;
+
+        uint128 liquidity =
+            LiquidityAmounts.getLiquidityForAmounts(sqrtPriceX96, sqrtLower, sqrtUpper, amount0Max, amount1Max);
+
+        // ─── multicall: init pool, then mint & settle ────────────────────────────
+        bytes[] memory params = new bytes[](2);
+        bytes[] memory mintParams = new bytes[](2);
+
+        params[0] = abi.encodeWithSelector(IPoolInitializer_v4.initializePool.selector, key, sqrtPriceX96);
+
+        bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
+        mintParams[0] =
+            abi.encode(key, tickLower, tickUpper, liquidity, amount0Max, amount1Max, address(this), new bytes(0));
+        mintParams[1] = abi.encode(key.currency0, key.currency1);
+
+        params[1] = abi.encodeWithSelector(
+            positionManager.modifyLiquidities.selector, abi.encode(actions, mintParams), block.timestamp + 60
+        );
+
+        _approveTokensForLiquidity(token0);
+        _approveTokensForLiquidity(token1);
+        positionManager.multicall(params);
+
+        return key;
+    }
+
+    function _approveTokensForLiquidity(address token) internal {
+        IERC20(token).approve(address(permit2), type(uint256).max);
+        IAllowanceTransfer(address(permit2)).approve(
+            token, address(positionManager), type(uint160).max, type(uint48).max
+        );
     }
 
     function tradeProposal(uint256 proposalId, bool yesThenNo, bool zeroForOne, uint256 amountIn, uint256 amountOutMin)
@@ -251,12 +321,7 @@ contract Market is IMarket, Ownable {
         IERC20(Currency.unwrap(inCur)).transferFrom(user, address(this), amountIn);
         IERC20(Currency.unwrap(inCur)).approve(address(permit2), amountIn);
         require(amountIn <= type(uint160).max, "amount too large");
-        permit2.approve(
-            Currency.unwrap(inCur),
-            address(router),
-            uint160(amountIn),
-            uint48(block.timestamp)
-        );
+        permit2.approve(Currency.unwrap(inCur), address(router), uint160(amountIn), uint48(block.timestamp));
 
         bytes memory actions =
             abi.encodePacked(uint8(Actions.SWAP_EXACT_IN_SINGLE), uint8(Actions.SETTLE_ALL), uint8(Actions.TAKE_ALL));
@@ -280,7 +345,7 @@ contract Market is IMarket, Ownable {
 
     function _priceFromTick(int24 tick) internal pure returns (uint256) {
         uint160 sqrtP = TickMath.getSqrtPriceAtTick(tick);
-        uint256 p192  = uint256(sqrtP) * uint256(sqrtP);
+        uint256 p192 = uint256(sqrtP) * uint256(sqrtP);
         return (p192 * 1e18) >> 192;
     }
 
@@ -299,7 +364,8 @@ contract Market is IMarket, Ownable {
     function resolveMarket(uint256 marketId, bool yesOrNo, bytes memory proof) external {
         MarketConfig storage market = markets[marketId];
         require(market.status == MarketStatus.PROPOSAL_ACCEPTED);
-        IMarketResolver(market.resolver).verifyResolution(yesOrNo, proof); // Should revert if verification fails.
+        uint256 proposalId = acceptedProposals[marketId];
+        IMarketResolver(market.resolver).verifyResolution(proposalId, yesOrNo, proof); // Should revert if verification fails.
         if (yesOrNo) {
             market.status = MarketStatus.RESOLVED_YES;
         } else {
@@ -329,5 +395,4 @@ contract Market is IMarket, Ownable {
 
         ERC20(market.marketToken).transfer(user, tradingRewards);
     }
-
 }

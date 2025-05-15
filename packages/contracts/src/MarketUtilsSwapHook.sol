@@ -93,18 +93,31 @@ contract MarketUtilsSwapHook is BaseHook, Ownable {
     {
         PoolId id = PoolIdLibrary.toId(key);
         Obs storage o = lastObs[id];
-        (, int24 tick,,) = poolManager.getSlot0(id);
 
+        (, int24 tick,,) = poolManager.getSlot0(id); // current tick
         uint32 now32 = uint32(block.timestamp);
+
+        // ────────────────────────────────────────────────────────────────────────
+        // 1. bring the cumulative tick forward to `now32`
+        //    (while o.time is still the previous observation)
         if (o.time != 0) {
-            o.tickCumulative += int56(int24(tick)) * int56(uint56(now32 - o.time));
+            o.tickCumulative += int56(o.lastTick) * int56(uint56(now32 - o.time));
         }
+
+        // ────────────────────────────────────────────────────────────────────────
+        // 2. compute a 30-second TWAP that *includes* the swap we just executed
+        if (o.time != 0 && now32 - o.time >= 30) {
+            // `o.time` is still the *previous* timestamp here, so dtNow ≥ 30
+            try this.getPrice(key, 30) returns (int24 avgTick) {
+                IMarket(market).updatePostSwap(key, avgTick); // ← delivers the TWAP
+            } catch {} // nothing to do if the pool is younger than 30 s
+        }
+
+        // ────────────────────────────────────────────────────────────────────────
+        // 3. store the NEW observation for the next swap
         o.time = now32;
         o.lastTick = tick;
 
-        try MarketUtilsSwapHook(address(this)).getPrice(key, 30) returns (int24 avgTick) {
-            IMarket(market).updatePostSwap(key, avgTick);
-        } catch {}
         return (BaseHook.afterSwap.selector, 0);
     }
 

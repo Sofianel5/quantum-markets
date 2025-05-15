@@ -30,6 +30,7 @@ import {UniswapV2Library} from "@uniswap/universal-router/contracts/modules/unis
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {FixedPointMathLib} from "solmate/src/utils/FixedPointMathLib.sol";
 import {DecisionToken, TokenType, VUSD} from "./Tokens.sol";
+import "forge-std/console.sol";
 
 contract Market is IMarket, Ownable {
     using StateLibrary for IPoolManager;
@@ -302,8 +303,9 @@ contract Market is IMarket, Ownable {
         uint256 proposalId = poolToProposal[poolId];
         ProposalConfig memory proposal = proposals[proposalId];
         MarketConfig storage marketConfig = markets[proposal.marketId];
-        PoolId yesPoolId = PoolIdLibrary.toId(proposal.yesPoolKey);
-        if (PoolId.unwrap(poolId) == PoolId.unwrap(yesPoolId)) {
+        PoolId yesPoolKey = PoolIdLibrary.toId(proposal.yesPoolKey);
+        if (PoolId.unwrap(poolId) == PoolId.unwrap(yesPoolKey)) {
+            console.log("right pool");
             uint256 yesPrice = _priceFromTick(avgTick);
             MaxProposal memory currentMax = marketMax[proposal.marketId];
             if (yesPrice > currentMax.yesPrice && currentMax.proposalId != proposalId) {
@@ -312,6 +314,8 @@ contract Market is IMarket, Ownable {
             if (yesPrice > marketConfig.strikePrice) {
                 _graduateMarket(proposalId);
             }
+        } else {
+            console.log("wrong pool");
         }
     }
 

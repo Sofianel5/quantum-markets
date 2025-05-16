@@ -301,28 +301,41 @@ contract Market is IMarket, Ownable {
     function updatePostSwap(PoolKey calldata poolKey, int24 avgTick) external onlyHook {
         PoolId poolId = PoolIdLibrary.toId(poolKey);
         uint256 proposalId = poolToProposal[poolId];
-        ProposalConfig memory proposal = proposals[proposalId];
-        MarketConfig storage marketConfig = markets[proposal.marketId];
-        PoolId yesPoolKey = PoolIdLibrary.toId(proposal.yesPoolKey);
-        if (PoolId.unwrap(poolId) == PoolId.unwrap(yesPoolKey)) {
-            console.log("right pool");
-            uint256 yesPrice = _priceFromTick(avgTick);
-            MaxProposal memory currentMax = marketMax[proposal.marketId];
-            if (yesPrice > currentMax.yesPrice && currentMax.proposalId != proposalId) {
-                marketMax[proposal.marketId] = MaxProposal({yesPrice: yesPrice, proposalId: proposalId});
-            }
-            if (yesPrice > marketConfig.strikePrice) {
-                _graduateMarket(proposalId);
-            }
-        } else {
-            console.log("wrong pool");
+        ProposalConfig storage proposal = proposals[proposalId];
+
+        // only track the YES pool
+        if (PoolId.unwrap(poolId) != PoolId.unwrap(PoolIdLibrary.toId(proposal.yesPoolKey))) return;
+
+        uint256 raw = _priceFromTick(avgTick); // token1 / token0
+        uint256 yesPrice = _yesPrice(poolKey, proposal, raw); // vUSD  /   YES
+
+        // ─── record highest price so far ─────────────────────
+        MaxProposal storage current = marketMax[proposal.marketId];
+        if (yesPrice > current.yesPrice) {
+            current.yesPrice = yesPrice;
+            current.proposalId = proposalId;
         }
+
+        // ─── graduate market if strike crossed ───────────────
+        MarketConfig storage market = markets[proposal.marketId];
+        if (yesPrice > market.strikePrice) _graduateMarket(proposalId);
     }
 
-    function _priceFromTick(int24 tick) internal pure returns (uint256) {
-        uint160 sqrtP = TickMath.getSqrtPriceAtTick(tick);
-        uint256 p192 = uint256(sqrtP) * uint256(sqrtP);
-        return (p192 * 1e18) >> 192;
+    function _priceFromTick(int24 tick) internal pure returns (uint256 pX18) {
+        uint160 sqrtP = TickMath.getSqrtPriceAtTick(tick); // Q64.96
+        uint256 p192 = uint256(sqrtP) * uint256(sqrtP); // Q128.192
+        unchecked {
+            pX18 = (p192 * 1e18) >> 192;
+        } // to 1e18
+    }
+
+    function _yesPrice(
+        PoolKey calldata key,
+        ProposalConfig memory p,
+        uint256 raw // = _priceFromTick(...)
+    ) internal pure returns (uint256) {
+        bool yesIsToken0 = Currency.unwrap(key.currency0) == address(p.yesToken);
+        return yesIsToken0 ? raw : (1e36 / raw); // keep 18-dec
     }
 
     function _graduateMarket(uint256 proposalId) internal {

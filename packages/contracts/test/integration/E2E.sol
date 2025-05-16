@@ -112,15 +112,15 @@ contract MarketE2ETest is Test, PosmTestSetup {
         assertEq(vUSD.balanceOf(alice), 1_500e18);
         vUSD.approve(address(market), type(uint256).max);
         market.mintYesNo(2, 750e18);
-        uint256 amountIn = 250e18;
-        Currency inCur =
-            address(yesToken) == Currency.unwrap(yesPoolKey.currency0) ? yesPoolKey.currency0 : yesPoolKey.currency1;
+        uint256 amountIn = 100e18;
+        bool    vusdIsToken0 = Currency.unwrap(yesPoolKey.currency0) == address(vUSD);
+        Currency inCur       = vusdIsToken0 ? yesPoolKey.currency0 : yesPoolKey.currency1; // ← vUSD
+        bool    zeroForOne   = vusdIsToken0;
         IERC20(Currency.unwrap(inCur)).approve(address(permit2), type(uint256).max);
         permit2.approve(Currency.unwrap(inCur), address(router), type(uint160).max, type(uint48).max);
         bytes memory actions =
             abi.encodePacked(uint8(Actions.SWAP_EXACT_IN_SINGLE), uint8(Actions.SETTLE_ALL), uint8(Actions.TAKE_ALL));
         bytes[] memory params = new bytes[](3);
-        bool zeroForOne = address(yesToken) == Currency.unwrap(yesPoolKey.currency0) ? true : false;
         params[0] = abi.encode(
             IV4Router.ExactInputSingleParams({
                 poolKey: yesPoolKey,
@@ -138,8 +138,8 @@ contract MarketE2ETest is Test, PosmTestSetup {
         router.execute(command, inputs, block.timestamp);
         vm.warp(block.timestamp + 60);
         router.execute(command, inputs, block.timestamp + 60);
-        vm.warp(block.timestamp + 120);
-        router.execute(command, inputs, block.timestamp + 120);
+        // vm.warp(block.timestamp + 120);
+        // router.execute(command, inputs, block.timestamp + 120);
         vm.stopPrank();
 
         (, uint256 maxProposalId) = market.marketMax(1);

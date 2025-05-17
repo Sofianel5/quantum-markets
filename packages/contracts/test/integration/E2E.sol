@@ -22,6 +22,7 @@ import {MarketUtilsSwapHook} from "../../src/MarketUtilsSwapHook.sol";
 import {MarketStatus} from "../../src/common/MarketData.sol";
 import {VUSD, DecisionToken} from "../../src/Tokens.sol";
 import {BasicMarketResolver} from "../../src/BasicMarketResolver.sol";
+import {MockMarketResolver} from "../mocks/MockMarketResolver.sol";
 import {PosmTestSetup} from "@uniswap/v4-periphery/test/shared/PosmTestSetup.sol";
 
 contract MarketE2ETest is Test, PosmTestSetup {
@@ -80,7 +81,7 @@ contract MarketE2ETest is Test, PosmTestSetup {
         uint256 marketId = market.createMarket(
             alice, // creator
             address(marketToken),
-            address(new BasicMarketResolver(address(this), address(this))),
+            address(new MockMarketResolver()),
             MIN_DEPOSIT,
             STRIKE_X18,
             "Predict price > 0.60"
@@ -150,11 +151,14 @@ contract MarketE2ETest is Test, PosmTestSetup {
         assertEq(uint8(status), uint8(MarketStatus.PROPOSAL_ACCEPTED));
 
         // /* 6.  Resolve YES with dummy resolver */
-        // vm.prank(address(market)); // dummy resolver expects caller = market
-        // market.resolveMarket(marketId, true, "");
+        vm.prank(address(market)); // dummy resolver expects caller = market
+        market.resolveMarket(marketId, true, "");
 
         // /* 7.  Alice redeems rewards (should not revert) */
-        // vm.prank(alice);
-        // market.redeemRewards(marketId, alice);
+        vm.startPrank(alice);
+        yesToken.approve(address(market), type(uint256).max);
+        noToken.approve(address(market), type(uint256).max);
+        market.redeemRewards(marketId, alice);
+        vm.stopPrank();
     }
 }

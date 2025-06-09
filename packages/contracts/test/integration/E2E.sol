@@ -34,7 +34,6 @@ contract MarketE2ETest is Test, PosmTestSetup {
     UniversalRouter internal router;
 
     uint24 internal constant FEE = 3_000;
-    uint256 internal constant STRIKE_X18 = 0.6e18; // strike price 0.60 vUSD / YES
     uint256 internal constant MIN_DEPOSIT = 1_500e18; // 1 000 vUSD
 
     function setUp() public {
@@ -83,7 +82,7 @@ contract MarketE2ETest is Test, PosmTestSetup {
             address(marketToken),
             address(new MockMarketResolver()),
             MIN_DEPOSIT,
-            STRIKE_X18,
+            block.timestamp + 1,
             "Predict price > 0.60"
         );
 

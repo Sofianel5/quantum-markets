@@ -129,7 +129,7 @@ contract Market is IMarket, Ownable {
         address marketToken,
         address resolver,
         uint256 minDeposit,
-        uint256 strikePrice,
+        uint256 deadline,
         string memory title
     ) external returns (uint256 marketId) {
         marketId = id.getId();
@@ -138,7 +138,7 @@ contract Market is IMarket, Ownable {
             id: marketId,
             createdAt: block.timestamp,
             minDeposit: minDeposit,
-            strikePrice: strikePrice,
+            deadline: deadline,
             creator: creator,
             marketToken: marketToken,
             resolver: resolver,
@@ -316,9 +316,9 @@ contract Market is IMarket, Ownable {
             current.proposalId = proposalId;
         }
 
-        // ─── graduate market if strike crossed ───────────────
+        // ─── graduate market if deadline crossed ───────────────
         MarketConfig storage market = markets[proposal.marketId];
-        if (yesPrice > market.strikePrice) _graduateMarket(proposalId);
+        if (block.timestamp > market.deadline) graduateMarket(proposal.marketId);
     }
 
     function _priceFromTick(int24 tick) internal pure returns (uint256 pX18) {
@@ -338,11 +338,12 @@ contract Market is IMarket, Ownable {
         return yesIsToken0 ? raw : (1e36 / raw); // keep 18-dec
     }
 
-    function _graduateMarket(uint256 proposalId) internal {
-        ProposalConfig memory proposalConfig = proposals[proposalId];
-        MarketConfig storage marketConfig = markets[proposalConfig.marketId];
+    function graduateMarket(uint256 marketId) public {
+        MarketConfig storage marketConfig = markets[marketId];
+        require(marketConfig.deadline < block.timestamp, "Market deadline not yet reached.");
+        MaxProposal storage maxProposal = marketMax[marketId];
         marketConfig.status = MarketStatus.PROPOSAL_ACCEPTED;
-        acceptedProposals[proposalConfig.marketId] = proposalId;
+        acceptedProposals[marketId] = maxProposal.proposalId;
     }
 
     function resolveMarket(uint256 marketId, bool yesOrNo, bytes memory proof) external {
